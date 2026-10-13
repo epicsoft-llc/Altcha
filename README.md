@@ -367,3 +367,5 @@ Issues are welcome on [GitLab](https://gitlab.com/epicsoft-networks/altcha/-/iss
 ## License
 
 MIT, see [LICENSE](https://gitlab.com/epicsoft-networks/altcha/-/blob/main/LICENSE).
+
+Please note that the MIT license only applies to the files created by epicsoft LLC. Other software may be licensed under other licenses.
