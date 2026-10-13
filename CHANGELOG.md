@@ -13,6 +13,34 @@ the versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 **A release is a git tag `X.Y.Z`** that matches `version` in `package.json`. CI builds `X.Y.Z`, `X.Y`, `X`
 from it, moves `latest` and creates the GitHub release from the entry below.
 
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- `POST /subscribe` passes a verified newsletter sign-up on to a list in Notifuse: address, name and language, to the
+  workspace and lists set for the site. Notifuse sends the double opt-in mail. An invalid address is refused before the
+  solution is spent
+- Site setting `subscription` (Notifuse address, workspace id, list ids) in the API and the site editor - a site can
+  have a mail recipient, a newsletter list or both. Optional lists per language: a sign-up goes to the lists of the
+  language tag the form sends or of a shorter one (`es-419` to `es`), else to the site's lists. Workspace and list ids
+  are letters and digits, as Notifuse takes them
+- Refusal reasons `subscribe_disabled` and `email_invalid`; `delivery_failed` also stands for a sign-up Notifuse refused
+- Metrics `altcha_subscriptions_total` and `altcha_subscription_errors_total`, endpoint `subscribe` in
+  `altcha_verified_total`, the example alert `AltchaNewsletterFailing`
+- Admin UI: sign-ups in the statistics and the site list, mail and newsletter failures together as "Delivery errors",
+  a newsletter form in the embed code
+
+### Changed
+
+- `/api/stats` and the site activity carry `subscribed` and `subscribeErrors`
+- The database gets four columns for the newsletter list. An older version refuses to start on it - take a backup
+  before upgrading
+
+### Fixed
+
+- Error texts of the mail server reach the log without mail addresses, as the README promises - for form submissions
+  and the test mail
+
 ## [0.1.1] - 2026-10-09
 
 ### Changed

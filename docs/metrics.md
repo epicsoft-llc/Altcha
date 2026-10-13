@@ -7,9 +7,11 @@ Part of the [ALTCHA service](../README.md).
 | Metric | Type | Labels | What it answers |
 |---|---|---|---|
 | `altcha_challenges_total` | counter | `site` | how many forms were opened |
-| `altcha_verified_total` | counter | `site`, `endpoint` (`verify`, `submit`) | how many solutions were accepted |
+| `altcha_verified_total` | counter | `site`, `endpoint` (`verify`, `submit`, `subscribe`) | how many solutions were accepted |
 | `altcha_mails_sent_total` | counter | `site` | how many submissions were delivered |
 | `altcha_smtp_errors_total` | counter | `site` | how many the mail server did not accept |
+| `altcha_subscriptions_total` | counter | `site` | how many sign-ups Notifuse accepted |
+| `altcha_subscription_errors_total` | counter | `site` | how many it refused or did not answer |
 | `altcha_rejected_total` | counter | `site`, `reason` | what was refused and why — `site` is `-` when the request matched no site |
 | `altcha_last_mail_sent_timestamp_seconds` | gauge | `site` | when a site last delivered — for "no mail for days" alerts |
 | `altcha_http_requests_total` | counter | `port`, `route`, `method`, `status` | traffic and error rates per endpoint; unknown paths are counted as `other` |
@@ -29,4 +31,4 @@ Part of the [ALTCHA service](../README.md).
 | `process_start_time_seconds`, `process_resident_memory_bytes`, `process_cpu_seconds_total`, `nodejs_heap_used_bytes` | gauge | | the process |
 | `nodejs_eventloop_lag_seconds` | gauge | `quantile` (`0.5`, `0.99`, `1`) | event loop delay since the last scrape |
 
-Alerting rules to start from - failing mail, a site gone quiet, many refusals, slow solving, failed sign-ins, internal errors: [`examples/prometheus-alerts.yml`](../examples/prometheus-alerts.yml).
+Alerting rules to start from - failing mail or newsletter, a site gone quiet, many refusals, slow solving, failed sign-ins, internal errors: [`examples/prometheus-alerts.yml`](../examples/prometheus-alerts.yml).

@@ -9,6 +9,8 @@ export const ALGORITHMS = ['PBKDF2/SHA-256', 'PBKDF2/SHA-384', 'PBKDF2/SHA-512',
 const SMTP_SECURITY = ['starttls', 'tls', 'none'];
 
 export const MAIL_ADDRESS = /^[^\s@<>,;:"()[\]\\]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
+// a language tag in lower case, like de, de-at, es-419 or zh-hant - for the site settings and the form
+export const LANGUAGE_TAG = /^[a-z]{2,3}(-[a-z0-9]{2,8}){0,2}$/;
 
 export class ConfigError extends Error {}
 

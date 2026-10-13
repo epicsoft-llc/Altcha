@@ -9,6 +9,13 @@ groups:
         annotations:
           summary: "Form mails for {{ $labels.site }} are not delivered"
 
+      - alert: AltchaNewsletterFailing
+        expr: increase(altcha_subscription_errors_total[30m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Newsletter sign-ups for {{ $labels.site }} are not accepted"
+
       - alert: AltchaNoMailForDays
         expr: time() - altcha_last_mail_sent_timestamp_seconds > 7 * 86400
         labels:

@@ -11,6 +11,7 @@ const SERIES = [
   { key: 'challenges', label: 'Challenges', short: 'challenges', color: '--s-challenges' },
   { key: 'verified', label: 'Verified', short: 'verified', color: '--s-verified' },
   { key: 'sent', label: 'Mails sent', short: 'sent', color: '--s-sent' },
+  { key: 'subscribed', label: 'Subscriptions', short: 'subscribed', color: '--s-subscribed' },
   { key: 'rejected', label: 'Refused', short: 'refused', color: '--s-rejected' },
 ];
 
@@ -19,8 +20,9 @@ const KPIS = [
   { key: 'challenges', label: 'Challenges', color: '--s-challenges', up: 'neutral' },
   { key: 'verified', label: 'Verified', color: '--s-verified', up: 'good' },
   { key: 'sent', label: 'Mails sent', color: '--s-sent', up: 'good' },
+  { key: 'subscribed', label: 'Subscriptions', color: '--s-subscribed', up: 'good' },
   { key: 'rejected', label: 'Refused', color: '--s-rejected', up: 'bad' },
-  { key: 'smtpErrors', label: 'SMTP errors', color: null, up: 'bad' },
+  { key: 'deliveryErrors', label: 'Delivery errors', color: null, up: 'bad' },
 ];
 
 const RANGES = {
@@ -36,6 +38,8 @@ const REASONS = {
   site_unknown: 'Unknown or disabled site',
   site_disabled: 'Site is disabled',
   submit_disabled: 'Mail delivery is off for the site',
+  subscribe_disabled: 'Newsletter list is off for the site',
+  email_invalid: 'No valid mail address',
   altcha_missing: 'No solution sent',
   altcha_malformed: 'Unreadable solution',
   altcha_algorithm: 'Other algorithm',
@@ -52,7 +56,7 @@ const REASONS = {
   body_incomplete: 'Request aborted by the client',
   too_many_fields: 'Too many fields',
   unsupported_media_type: 'Unsupported format',
-  delivery_failed: 'Mail server refused the mail',
+  delivery_failed: 'Mail server or newsletter refused it',
   honeypot: 'Honeypot filled in - a bot',
 };
 
@@ -201,6 +205,10 @@ async function loadHistory() {
   }
   const result = await request('api/stats?' + params);
   if (result.ok) {
+    // mail and newsletter failures share one tile and one column
+    for (const totals of [result.body.totals, result.body.previousTotals, ...result.body.points]) {
+      totals.deliveryErrors = totals.smtpErrors + totals.subscribeErrors;
+    }
     state.history = result.body;
   }
   return result;
@@ -288,7 +296,7 @@ function renderNotices() {
     notices.push('The admin port runs without authentication. Keep it off the internet, and sign in through a proxy (ADMIN_PROXY_USER_HEADER) or with Basic auth (ADMIN_USERNAME, ADMIN_PASSWORD).');
   }
   if (s.smtp === null) {
-    notices.push('SMTP is not configured - /submit is off, sites can only use challenge and verify.');
+    notices.push('SMTP is not configured - /submit is off; challenge, verify and /subscribe still work.');
   }
   if (!s.publicUrl) {
     notices.push('PUBLIC_URL is not set - the embed snippets show a placeholder address.');
@@ -405,7 +413,8 @@ function rangeFormatter() {
 function describeChart(data) {
   const t = data.totals;
   return `Activity, ${RANGES[state.range].label}, ${scopeName()}: ${integer.format(t.challenges)} challenges, `
-    + `${integer.format(t.verified)} verified, ${integer.format(t.sent)} mails sent, ${integer.format(t.rejected)} refused. `
+    + `${integer.format(t.verified)} verified, ${integer.format(t.sent)} mails sent, ${integer.format(t.subscribed)} subscriptions, `
+    + `${integer.format(t.rejected)} refused. `
     + 'Use the arrow keys to read single periods, or switch to the table.';
 }
 
@@ -429,11 +438,11 @@ function renderLegend() {
 function renderActivityTable() {
   const h = state.history;
   const format = rangeFormatter();
-  const head = el('tr', {}, el('th', { scope: 'col' }, 'Period'), ...SERIES.map((s) => el('th', { scope: 'col' }, s.label)), el('th', { scope: 'col' }, 'SMTP errors'));
+  const head = el('tr', {}, el('th', { scope: 'col' }, 'Period'), ...SERIES.map((s) => el('th', { scope: 'col' }, s.label)), el('th', { scope: 'col' }, 'Delivery errors'));
   const rows = [...h.points].reverse().map((p) => el('tr', {},
     el('th', { scope: 'row' }, format(p.t, p.t + h.bucketSeconds)),
     ...SERIES.map((s) => el('td', {}, integer.format(p[s.key]))),
-    el('td', {}, integer.format(p.smtpErrors))));
+    el('td', {}, integer.format(p.deliveryErrors))));
   $('#activity-table').replaceChildren(el('table', { class: 'data-table' }, el('thead', {}, head), el('tbody', {}, rows)));
 }
 
@@ -476,7 +485,7 @@ function renderReasons() {
 
 function activityTotal(site) {
   const a = site.activity;
-  return a.challenges + a.verified + a.sent + a.rejected;
+  return a.challenges + a.verified + a.sent + a.subscribed + a.rejected;
 }
 
 function visibleSites() {
@@ -491,7 +500,8 @@ function visibleSites() {
     if (query === '') {
       return true;
     }
-    return [site.name, site.note, site.recipient ?? '', ...site.origins].some((text) => text.toLowerCase().includes(query));
+    const lists = [...(site.subscription?.listIds ?? []), ...Object.values(site.subscription?.languageLists ?? {}).flat()];
+    return [site.name, site.note, site.recipient ?? '', ...lists, ...site.origins].some((text) => text.toLowerCase().includes(query));
   });
   const byName = (a, b) => a.name.localeCompare(b.name);
   if (state.sort === 'activity') {
@@ -549,9 +559,27 @@ function originsCell(site) {
 function activityCell(site) {
   const a = site.activity;
   const value = (n) => el('strong', { class: n === 0 ? 'zero' : null }, compact.format(n));
-  return el('div', { class: 'activity', title: `${a.challenges} challenges, ${a.verified} verified, ${a.sent} mails sent, ${a.rejected} refused` },
-    el('span', {}, 'verified'), el('span', {}, 'sent'), el('span', {}, 'refused'),
-    value(a.verified), value(a.sent), value(a.rejected));
+  return el('div', { class: 'activity', title: `${a.challenges} challenges, ${a.verified} verified, ${a.sent} mails sent, ${a.subscribed} subscriptions, ${a.rejected} refused` },
+    el('span', {}, 'verified'), el('span', {}, 'delivered'), el('span', {}, 'refused'),
+    value(a.verified), value(a.sent + a.subscribed), value(a.rejected));
+}
+
+function deliveryCell(site) {
+  const parts = [];
+  if (site.recipient !== null) {
+    parts.push(el('span', { class: 'recipient' }, site.recipient));
+  }
+  if (site.subscription !== null) {
+    const { url, workspaceId, listIds, languageLists } = site.subscription;
+    const languages = Object.keys(languageLists);
+    const perLanguage = Object.entries(languageLists).map(([language, ids]) => `; ${language}: ${ids.join(', ')}`).join('');
+    parts.push(el('span', { class: 'chip', title: `/subscribe passes addresses to ${url}, workspace ${workspaceId}${perLanguage}` },
+      `list ${listIds.join(', ')}${languages.length > 0 ? ` · ${languages.join(', ')}` : ''}`));
+  }
+  if (parts.length === 0) {
+    parts.push(el('span', { class: 'chip', title: '/submit and /subscribe are off for this site' }, 'verify only'));
+  }
+  return el('div', { class: 'delivery' }, ...parts);
 }
 
 function actionButton(name, label, onclick, extra = {}) {
@@ -575,8 +603,7 @@ function siteRow(site) {
       el('div', { class: 'site-name' }, site.name),
       site.note ? el('div', { class: 'site-note site-sub' }, site.note) : null,
       ...originsCell(site)),
-    el('td', { class: 'cell-mail', 'data-label': 'Mail to' },
-      site.recipient === null ? el('span', { class: 'chip', title: '/submit is off for this site' }, 'verify only') : el('span', { class: 'recipient' }, site.recipient)),
+    el('td', { class: 'cell-mail', 'data-label': 'Delivers to' }, deliveryCell(site)),
     el('td', { class: 'cell-activity num', 'data-label': 'Last 24 h' }, activityCell(site)),
     el('td', { class: 'cell-last muted', 'data-label': 'Last activity' }, ago(site.lastActivity)),
     el('td', { class: 'cell-actions' }, el('div', { class: 'actions' },
@@ -661,6 +688,20 @@ function originTokens(text) {
   return text.split(/[\s,;]+/).map((t) => t.trim()).filter((t) => t !== '');
 }
 
+// "fr: newsletterfr, updatesfr" per line; language and ids are checked by the service
+function languageLines(text) {
+  const lists = {};
+  for (const line of text.split('\n').filter((l) => l.trim() !== '')) {
+    const at = line.indexOf(':');
+    lists[(at < 0 ? line : line.slice(0, at)).trim()] = at < 0 ? '' : line.slice(at + 1);
+  }
+  return lists;
+}
+
+function languageText(languageLists) {
+  return Object.entries(languageLists ?? {}).map(([language, ids]) => `${language}: ${ids.join(', ')}`).join('\n');
+}
+
 function updateOriginCount() {
   const tokens = originTokens($('#f-origins').value);
   const unique = new Set(tokens.map((t) => t.toLowerCase().replace(/\/+$/, '')));
@@ -723,6 +764,10 @@ function openEditor(site) {
   form.elements.origins.value = [...(site?.origins ?? [])].sort(natural.compare).join('\n');
   form.elements.recipient.value = site?.recipient ?? '';
   form.elements.subjectPrefix.value = site?.subjectPrefix ?? '';
+  form.elements.subscriptionUrl.value = site?.subscription?.url ?? '';
+  form.elements.subscriptionWorkspace.value = site?.subscription?.workspaceId ?? '';
+  form.elements.subscriptionLists.value = site?.subscription?.listIds.join(', ') ?? '';
+  form.elements.subscriptionLanguageLists.value = languageText(site?.subscription?.languageLists);
   form.elements.submitPerHour.value = site?.submitPerHour ?? 200;
   form.elements.successUrl.value = site?.successUrl ?? '';
   form.elements.errorUrl.value = site?.errorUrl ?? '';
@@ -744,6 +789,13 @@ async function saveSite(event) {
     origins: originTokens(form.elements.origins.value),
     recipient: form.elements.recipient.value,
     subjectPrefix: form.elements.subjectPrefix.value,
+    // all empty: no list; the service splits the list ids itself
+    subscription: {
+      url: form.elements.subscriptionUrl.value,
+      workspaceId: form.elements.subscriptionWorkspace.value,
+      listIds: form.elements.subscriptionLists.value,
+      languageLists: languageLines(form.elements.subscriptionLanguageLists.value),
+    },
     submitPerHour: Number(form.elements.submitPerHour.value),
     successUrl: form.elements.successUrl.value,
     errorUrl: form.elements.errorUrl.value,
@@ -845,6 +897,14 @@ function renderEmbed() {
   const languageAttribute = language === 'auto' || language === 'en-only' ? '' : ` language="${language}"`;
   const widgetTag = `<altcha-widget challenge="${base}/challenge"${languageAttribute}></altcha-widget>`;
   const scriptTag = `<script type="module" src="${base}/${script}"></script>`;
+  const honeypot = `  <input name="${state.status.honeypotField}" tabindex="-1" autocomplete="off" aria-hidden="true" class="hp">`;
+  const honeypotStyle = [
+    '',
+    '<style>',
+    '  /* the honeypot: people never see it, bots fill it in - with a strict CSP move this rule into your stylesheet */',
+    '  .hp { position: absolute; left: -10000px; }',
+    '</style>',
+  ];
 
   $('#embed-hint').textContent = state.status.publicUrl
     ? `${site.name} · works on ${site.origins.length === 1 ? site.origins[0] : `${site.origins.length} origins`}`
@@ -868,15 +928,37 @@ function renderEmbed() {
       '  <input name="email" type="email" required>',
       '  <input name="subject">',
       '  <textarea name="message" required></textarea>',
-      `  <input name="${state.status.honeypotField}" tabindex="-1" autocomplete="off" aria-hidden="true" class="hp">`,
+      honeypot,
       `  ${widgetTag}`,
       '  <button type="submit">Send</button>',
       '</form>',
+      ...honeypotStyle,
+    ].join('\n');
+  }
+
+  const subscription = site.subscription;
+  $('#subscribe-note').hidden = subscription === null;
+  $('#code-subscribe').closest('.code').hidden = subscription === null;
+  if (subscription === null) {
+    $('#code-subscribe').textContent = '';
+  }
+  else {
+    const languages = Object.keys(subscription.languageLists);
+    $('#subscribe-note').textContent = `Newsletter form: the address goes to the list ${subscription.listIds.join(', ')} in the workspace `
+      + `${subscription.workspaceId}${languages.length > 0 ? `, with the language ${languages.join(', ')} to the lists set for it` : ''}; `
+      + 'name and language are optional. With double opt-in, Notifuse mails the confirmation link.';
+    $('#code-subscribe').textContent = [
+      scriptTag,
       '',
-      '<style>',
-      '  /* the honeypot: people never see it, bots fill it in - with a strict CSP move this rule into your stylesheet */',
-      '  .hp { position: absolute; left: -10000px; }',
-      '</style>',
+      `<form action="${base}/subscribe" method="post">`,
+      '  <input name="email" type="email" required>',
+      '  <input name="name">',
+      '  <input name="language" type="hidden" value="en">',
+      honeypot,
+      `  ${widgetTag}`,
+      '  <button type="submit">Subscribe</button>',
+      '</form>',
+      ...honeypotStyle,
     ].join('\n');
   }
 
@@ -904,7 +986,7 @@ function renderEmbed() {
     `script-src  'self' ${origin}`,
     `connect-src 'self' ${origin}`,
     "worker-src  'self' blob:",
-    ...(site.recipient === null ? [] : [`form-action 'self' ${origin}`]),
+    ...(site.recipient === null && site.subscription === null ? [] : [`form-action 'self' ${origin}`]),
   ].join('\n');
 }
 

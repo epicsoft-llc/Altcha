@@ -6,6 +6,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+### vfox ###
+.vfox/
+
 ### AI assistant ###
 CLAUDE.md
 .claude/

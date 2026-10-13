@@ -20,8 +20,8 @@ function currentHour() {
   return Math.floor(Date.now() / 3600000);
 }
 
-function emptyTotals() {
-  return { challenges: 0, verified: 0, sent: 0, rejected: 0, smtpErrors: 0 };
+export function emptyTotals() {
+  return { challenges: 0, verified: 0, sent: 0, rejected: 0, smtpErrors: 0, subscribed: 0, subscribeErrors: 0 };
 }
 
 // stored event name -> field of a totals object
@@ -37,6 +37,12 @@ function addEvent(totals, event, count) {
   }
   else if (event === 'smtp_error') {
     totals.smtpErrors += count;
+  }
+  else if (event === 'subscribed') {
+    totals.subscribed += count;
+  }
+  else if (event === 'subscribe_error') {
+    totals.subscribeErrors += count;
   }
   else if (event.startsWith('rejected:')) {
     totals.rejected += count;
@@ -95,6 +101,8 @@ export class Stats {
     this.verifiedCount = registry.register(new Counter('altcha_verified_total', 'Solutions accepted.', ['site', 'endpoint']));
     this.mails = registry.register(new Counter('altcha_mails_sent_total', 'Form submissions delivered by mail.', ['site']));
     this.smtpErrors = registry.register(new Counter('altcha_smtp_errors_total', 'Form submissions the mail server did not accept.', ['site']));
+    this.subscriptions = registry.register(new Counter('altcha_subscriptions_total', 'Form submissions passed on to a newsletter list.', ['site']));
+    this.subscriptionErrors = registry.register(new Counter('altcha_subscription_errors_total', 'Form submissions the newsletter list did not accept.', ['site']));
     this.rejections = registry.register(new Counter('altcha_rejected_total', 'Requests refused, by reason.', ['site', 'reason']));
     this.lastMail = registry.register(new Gauge('altcha_last_mail_sent_timestamp_seconds', 'Time of the last delivered submission per site.', ['site']));
     this.requests = registry.register(new Counter('altcha_http_requests_total', 'HTTP requests by port, route, method and status.', ['port', 'route', 'method', 'status']));
@@ -142,6 +150,16 @@ export class Stats {
     this.smtpErrors.inc({ site: site.name });
     this.smtpTime.observe({ outcome: 'failed' }, seconds);
     this.#record(site, 'smtp_error');
+  }
+
+  subscribed(site) {
+    this.subscriptions.inc({ site: site.name });
+    this.#record(site, 'subscribed');
+  }
+
+  subscribeError(site) {
+    this.subscriptionErrors.inc({ site: site.name });
+    this.#record(site, 'subscribe_error');
   }
 
   rejected(site, reason) {

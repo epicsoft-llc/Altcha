@@ -2,7 +2,7 @@
 
 This Docker image is managed and kept up to date by [epicsoft LLC](https://epicsoft.one).
 
-A self-hosted service that protects web forms with [ALTCHA](https://altcha.org) proof-of-work challenges — for many sites at once, managed in a small web UI. It issues and verifies the challenges, serves the widget, and can mail a verified form submission, so a static site gets a working contact form without a backend of its own.
+A self-hosted service that protects web forms with [ALTCHA](https://altcha.org) proof-of-work challenges — for many sites at once, managed in a small web UI. It issues and verifies the challenges, serves the widget, and can mail a verified form submission or pass a newsletter sign-up on to [Notifuse](https://www.notifuse.com), so a static site gets working forms without a backend of its own.
 
 * Base image: https://hub.docker.com/_/node (`node:24-alpine`), platforms `linux/amd64` and `linux/arm64`
 * Dockerfile: https://gitlab.com/epicsoft-networks/altcha/-/blob/main/Dockerfile
@@ -13,7 +13,7 @@ A self-hosted service that protects web forms with [ALTCHA](https://altcha.org) 
 
 | | |
 |---|---|
-| `8080` | public port: widget, challenge, verify, submit |
+| `8080` | public port: widget, challenge, verify, submit, subscribe |
 | `8081` | admin port: web UI, site API, metrics, health check — keep it off the internet |
 | `/data` | volume with the SQLite database, writable for uid `1000` |
 
@@ -23,14 +23,15 @@ A self-hosted service that protects web forms with [ALTCHA](https://altcha.org) 
 
 - Challenges in the current ALTCHA format (widget v3), signed with HMAC and bound to the site they were issued for
 - Every solution can be spent exactly once, also across restarts
-- Sites managed in a web UI: any number of allowed origins, mail recipient, subject prefix, rate limit, redirect pages
+- Sites managed in a web UI: any number of allowed origins, mail recipient, newsletter list, subject prefix, rate limit, redirect pages
 - Statistics in the web UI: activity over 24 hours to 90 days, totals compared with the period before, refused requests by reason — for all sites or one
 - `/submit` mails a verified form to the site's recipient — no backend needed for a static site
+- `/subscribe` passes a verified sign-up on to the site's newsletter list in Notifuse, which sends the double opt-in mail
 - `/verify` for applications with their own backend
 - The widget is served by the service itself, in English or with all of its 68 languages, so no project copies a JavaScript file into its repository
 - Rate limits per client address and per site, a honeypot field, strict origin check
 - No cookies, no state in the browser, no file uploads
-- Prometheus metrics (requests, latencies, solve times, mail, database, process), a container health check, data in a single SQLite file
+- Prometheus metrics (requests, latencies, solve times, mail, newsletter, database, process), a container health check, data in a single SQLite file
 
 ## Screenshots
 
@@ -60,6 +61,7 @@ browser                      this service                         your backend (
    |  GET  /challenge  ---------->|  signed challenge for the site of the Origin
    |  (widget solves it)          |
    |  POST /submit  ------------->|  verify, mark as spent, mail to the site's recipient
+   |  POST /subscribe  ---------->|  verify, mark as spent, address to the site's newsletter list
    |                              |
    |  POST /your-form  -------------------------------------------------->|
    |                              |<------------  POST /verify  ----------|
@@ -73,7 +75,7 @@ A request from a browser is mapped to a site by its `Origin` header (or `Referer
 ```yaml
 services:
   altcha:
-    image: epicsoft/altcha:0.0.1
+    image: epicsoft/altcha:0.2.0
     restart: unless-stopped
     environment:
       PUBLIC_URL: https://altcha.example.com
@@ -113,7 +115,7 @@ The service runs as user `node` (uid `1000`), so the data directory has to be wr
 mkdir -p data && sudo chown 1000:1000 data
 ```
 
-Open the admin UI on port `8081`, create a site with its origins (for example `https://www.example.com`) and, if the service should mail its form, a recipient. The **Embed** button shows the snippet for that site.
+Open the admin UI on port `8081`, create a site with its origins (for example `https://www.example.com`) and, if the service should mail its form, a recipient - or a newsletter list for a sign-up form. The **Embed** button shows the snippet for that site.
 
 ## Embedding
 
@@ -143,6 +145,28 @@ Open the admin UI on port `8081`, create a site with its origins (for example `h
 - `website` is the honeypot (`HONEYPOT_FIELD`): a human never fills it in. A submission that does is answered like a success and dropped. Under a Content Security Policy without `'unsafe-inline'` for styles the `<style>` block is ignored and the field shows — move the rule into your stylesheet then.
 - For a widget in another language use `/widget.i18n.js` (all translations, about 180 kB instead of 120 kB) and set `language="de"` on `<altcha-widget>`.
 
+### A newsletter sign-up
+
+`/subscribe` passes a verified sign-up on to a list in Notifuse. Its address, workspace and lists are set per site - never taken from the request, so nobody can be put on another list.
+
+```html
+<form action="https://altcha.example.com/subscribe" method="post">
+  <input name="email" type="email" required>
+  <input name="name">
+  <input name="language" type="hidden" value="en">
+  <input name="website" tabindex="-1" autocomplete="off" aria-hidden="true" class="hp">
+  <altcha-widget challenge="https://altcha.example.com/challenge"></altcha-widget>
+  <button type="submit">Subscribe</button>
+</form>
+```
+
+- Only `email`, `name` (as the full name) and `language` reach Notifuse; every other field is dropped. An invalid address is refused as `email_invalid` before the solution is spent, so the visitor can correct it without solving again.
+- The lists have to be public in Notifuse. With double opt-in on the list, Notifuse mails the confirmation link itself.
+- Lists per language: a sign-up whose `language` has lists of its own at the site goes there instead (`de-at` falls back to `de`, `es-419` to `es`).
+- The service posts to the public `/subscribe` of Notifuse, no API key - in the same Docker network for example `http://notifuse:8080`. Notifuse sees the address of this service, not the visitor's.
+- Workspace and list ids never appear in the page. Notifuse's own `/subscribe` stays reachable - its confirmation page needs it - so keep its rate limits.
+- Rate limits, redirect pages and honeypot work as for `/submit`; a site can have both.
+
 ### Pages with a Content Security Policy
 
 The widget is loaded from this service, fetches its challenge from it, solves it in Web Workers it creates from a `blob:` URL (falling back to `data:`), and adds one `<style>` element to the page. A page with a CSP has to allow that:
@@ -154,7 +178,7 @@ worker-src  'self' blob:
 form-action 'self' https://altcha.example.com
 ```
 
-`form-action` only matters for a form that posts to `/submit` directly. For the `<style>` element, either allow `'unsafe-inline'` in `style-src`, or put the nonce of your CSP into `<meta name="csp-nonce" content="…">` — the widget sets it on the element.
+`form-action` only matters for a form that posts to `/submit` or `/subscribe` directly. For the `<style>` element, either allow `'unsafe-inline'` in `style-src`, or put the nonce of your CSP into `<meta name="csp-nonce" content="…">` — the widget sets it on the element.
 
 ### A form handled by your own backend
 
@@ -181,6 +205,7 @@ A refused solution is answered with `403` and `{"ok": false, "error": "<reason>"
 | `GET /challenge` | a new challenge for the site of the `Origin` |
 | `POST /verify` | check a solution, from a browser or a backend |
 | `POST /submit` | check a solution and mail the form to the site's recipient |
+| `POST /subscribe` | check a solution and pass the address on to the site's newsletter list |
 
 Bodies are accepted as `application/x-www-form-urlencoded` or `application/json` (flat, no nested objects), up to `MAX_BODY_BYTES`. `multipart/form-data` — and with it file uploads — is refused.
 
@@ -210,7 +235,7 @@ The API - routes, the shape of a site, examples with the token - is described in
 ### The web UI
 
 - **Statistics** for 24 hours, 7, 30 or 90 days, for all sites or a single one: totals with the change against the period before, activity as a chart (with a table view and keyboard navigation), refused requests by reason. The period still running is drawn faint, so it does not read as a drop.
-- **Sites**: search across name, note, address and origins, filter by state, sort by name or activity, switch a site on and off in its row, edit, delete, send a test mail, copy the embed code with the widget language of your choice.
+- **Sites**: search across name, note, address, list and origins, filter by state, sort by name or activity, switch a site on and off in its row, edit, delete, send a test mail, copy the embed code with the widget language of your choice.
 - Refreshes itself every 30 seconds while the tab is visible. Light and dark follow the system and can be switched. Works down to phone width.
 
 ## Behind a reverse proxy
@@ -240,9 +265,10 @@ A new version brings its database changes along and applies them on start, each 
 | Database | the sites; for every spent challenge its random nonce and expiry — no address, no form content | sites until deleted, nonces until the challenge expires |
 | Memory | client addresses of the rate limits, counters | addresses for about an hour (the window plus a ten-minute cleanup), counters until the process ends |
 | Mail | the submitted form fields, sent to the site's recipient | not stored by the service |
-| Log | refused requests with reason and site, refused admin sign-ins with reason (and the user name a proxy passed), changes in the admin UI with the user, mail server errors | as long as the container log is kept |
+| Newsletter | address, name and language, sent to the site's Notifuse list | not stored by the service |
+| Log | refused requests with reason and site, refused admin sign-ins with reason (and the user name a proxy passed), changes in the admin UI with the user, mail server and newsletter errors | as long as the container log is kept |
 
-The service never writes a form field or a visitor's address to the database or to the log. What it sends on is the mail itself — the fields the form has, so a form should only ask for what the recipient needs.
+The service never writes a form field or a visitor's address to the database or to the log. What it sends on is the mail itself or the sign-up — the fields the form has, so a form should only ask for what the recipient needs.
 
 ## Mail
 
@@ -306,7 +332,7 @@ The mail goes from `SMTP_FROM` to the site's recipient. The recipient comes from
 
 ## Metrics
 
-`GET /metrics` on the admin port, Prometheus text format, behind the sign-in. It counts per site and per refusal reason, measures requests and latency per endpoint, the solve time in the browser and the age of a challenge when it is spent (the numbers to tune `ALTCHA_COST` and `ALTCHA_EXPIRES` with), mail delivery, refused admin sign-ins, the database, the process and the event loop.
+`GET /metrics` on the admin port, Prometheus text format, behind the sign-in. It counts per site and per refusal reason, measures requests and latency per endpoint, the solve time in the browser and the age of a challenge when it is spent (the numbers to tune `ALTCHA_COST` and `ALTCHA_EXPIRES` with), mail delivery, newsletter sign-ups, refused admin sign-ins, the database, the process and the event loop.
 
 Every metric with what it answers: [docs/metrics.md](https://gitlab.com/epicsoft-networks/altcha/-/blob/main/docs/metrics.md). Alerting rules to start from: [examples/prometheus-alerts.yml](https://gitlab.com/epicsoft-networks/altcha/-/blob/main/examples/prometheus-alerts.yml).
 
@@ -316,8 +342,8 @@ Released through a git tag `X.Y.Z`, which publishes `X.Y.Z`, `X.Y`, `X` and move
 
 | Tag | Content |
 |---|---|
-| `0.0.1` | exactly this build - **use this in production** |
-| `0.0` | latest patch of `0.0` |
+| `0.2.0` | exactly this build - **use this in production** |
+| `0.2` | latest patch of `0.2` |
 | `latest` | newest release of any version - **can change the major version without warning** |
 | `develop` | current state of the `develop` branch, not for production |
 

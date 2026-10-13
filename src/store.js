@@ -41,6 +41,12 @@ const MIGRATIONS = [
      PRIMARY KEY (hour, site_id, event)
    ) WITHOUT ROWID;
    CREATE INDEX stat_site ON stat(site_id, hour);`,
+  // the newsletter list behind /subscribe - all three set or none
+  `ALTER TABLE site ADD COLUMN subscribe_url TEXT;
+   ALTER TABLE site ADD COLUMN subscribe_workspace TEXT;
+   ALTER TABLE site ADD COLUMN subscribe_lists TEXT;`,
+  // other lists for the language a sign-up comes with, as JSON - NULL without a list
+  `ALTER TABLE site ADD COLUMN subscribe_language_lists TEXT;`,
 ];
 
 // site_id 0 in `stat` stands for a request that matched no site
@@ -71,6 +77,14 @@ function toSite(row, origins) {
     name: row.name,
     origins,
     recipient: row.recipient,
+    subscription: row.subscribe_url === null
+      ? null
+      : {
+        url: row.subscribe_url,
+        workspaceId: row.subscribe_workspace,
+        listIds: row.subscribe_lists.split(','),
+        languageLists: JSON.parse(row.subscribe_language_lists ?? '{}'),
+      },
     subjectPrefix: row.subject_prefix,
     successUrl: row.success_url,
     errorUrl: row.error_url,
@@ -110,10 +124,14 @@ export class Store {
       origins: db.prepare('SELECT origin FROM site_origin WHERE site_id = ? ORDER BY origin'),
       allOrigins: db.prepare('SELECT origin, site_id FROM site_origin ORDER BY origin'),
       originOwner: db.prepare('SELECT s.name FROM site_origin o JOIN site s ON s.id = o.site_id WHERE o.origin = ? AND o.site_id <> ?'),
-      insertSite: db.prepare(`INSERT INTO site (name, recipient, subject_prefix, success_url, error_url, submit_per_hour, enabled, note, created_at, updated_at)
-                              VALUES (:name, :recipient, :subjectPrefix, :successUrl, :errorUrl, :submitPerHour, :enabled, :note, :now, :now)`),
-      updateSite: db.prepare(`UPDATE site SET name = :name, recipient = :recipient, subject_prefix = :subjectPrefix, success_url = :successUrl,
-                              error_url = :errorUrl, submit_per_hour = :submitPerHour, enabled = :enabled, note = :note, updated_at = :now
+      insertSite: db.prepare(`INSERT INTO site (name, recipient, subscribe_url, subscribe_workspace, subscribe_lists, subscribe_language_lists, subject_prefix,
+                                                success_url, error_url, submit_per_hour, enabled, note, created_at, updated_at)
+                              VALUES (:name, :recipient, :subscribeUrl, :subscribeWorkspace, :subscribeLists, :subscribeLanguageLists, :subjectPrefix,
+                                      :successUrl, :errorUrl, :submitPerHour, :enabled, :note, :now, :now)`),
+      updateSite: db.prepare(`UPDATE site SET name = :name, recipient = :recipient, subscribe_url = :subscribeUrl, subscribe_workspace = :subscribeWorkspace,
+                              subscribe_lists = :subscribeLists, subscribe_language_lists = :subscribeLanguageLists, subject_prefix = :subjectPrefix,
+                              success_url = :successUrl, error_url = :errorUrl,
+                              submit_per_hour = :submitPerHour, enabled = :enabled, note = :note, updated_at = :now
                               WHERE id = :id`),
       deleteSite: db.prepare('DELETE FROM site WHERE id = ?'),
       deleteOrigins: db.prepare('DELETE FROM site_origin WHERE site_id = ?'),
@@ -185,6 +203,10 @@ export class Store {
     return {
       name: site.name,
       recipient: site.recipient,
+      subscribeUrl: site.subscription?.url ?? null,
+      subscribeWorkspace: site.subscription?.workspaceId ?? null,
+      subscribeLists: site.subscription?.listIds.join(',') ?? null,
+      subscribeLanguageLists: site.subscription === null ? null : JSON.stringify(site.subscription.languageLists),
       subjectPrefix: site.subjectPrefix,
       successUrl: site.successUrl,
       errorUrl: site.errorUrl,

@@ -3,9 +3,9 @@
 
 import { createAuth, FAILURE_LIMIT, FAILURE_WINDOW_SECONDS } from './auth.js';
 import { BodyError, mediaType, readBody, sendJson, sendText } from './http.js';
-import { buildMessage } from './mail.js';
+import { buildMessage, withoutAddresses } from './mail.js';
 import { ValidationError, validateSite } from './sites.js';
-import { RANGES } from './stats.js';
+import { emptyTotals, RANGES } from './stats.js';
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
@@ -60,7 +60,7 @@ export function createAdminHandler({ config, store, stats, mailer, assets, log }
     const lastHour = activity.last.get(site.id);
     return {
       ...site,
-      activity: activity.bySite.get(site.id) ?? { challenges: 0, verified: 0, sent: 0, rejected: 0, smtpErrors: 0 },
+      activity: activity.bySite.get(site.id) ?? emptyTotals(),
       lastActivity: lastHour === undefined ? null : lastHour * 3600,
     };
   }
@@ -143,7 +143,8 @@ export function createAdminHandler({ config, store, stats, mailer, assets, log }
       await mailer.send({ from: config.smtp.from, to: site.recipient, message });
     }
     catch (e) {
-      log.error(`test mail for site=${site.name} failed: ${e.message}`);
+      // the answer keeps the full text - the admin set the recipient, the log does not need it
+      log.error(`test mail for site=${site.name} failed: ${withoutAddresses(e.message)}`);
       sendJson(res, 502, { ok: false, error: 'delivery_failed', detail: e.message }, SECURITY_HEADERS);
       return;
     }
