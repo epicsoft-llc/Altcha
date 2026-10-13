@@ -1,6 +1,6 @@
 {
   "name": "altcha-service",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Self-hosted ALTCHA challenge, verification and form mail service with an admin web UI",
   "license": "MIT",

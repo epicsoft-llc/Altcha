@@ -1,7 +1,8 @@
 // Test fixtures: the service in-process on free ports with a temporary data
-// directory, and an SMTP sink that records what it receives.
+// directory, an SMTP sink and a newsletter sink that record what they receive.
 
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,6 +53,12 @@ export function startSmtpSink() {
           socket.write('250 ok\r\n');
         }
         else if (verb === 'RCPT') {
+          // a recipient blocked@ is refused with its address in the reply, as mail servers do
+          const address = /<([^>]*)>/.exec(line)?.[1] ?? '';
+          if (address.startsWith('blocked@')) {
+            socket.write(`550 5.1.1 <${address}>: Recipient address rejected\r\n`);
+            continue;
+          }
           current.to.push(line);
           socket.write('250 ok\r\n');
         }
@@ -78,7 +85,36 @@ export function startSmtpSink() {
   });
 }
 
-export async function startService(env = {}) {
+// Stands in for the subscribe endpoint of Notifuse: records every request and refuses
+// the list 'closed' the way Notifuse refuses a list that is not public.
+export function startNewsletterSink() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => {
+      raw += chunk;
+    });
+    req.on('end', () => {
+      const body = JSON.parse(raw);
+      requests.push({ method: req.method, path: req.url, type: req.headers['content-type'], body });
+      // 'closed' refuses like a list that is not public, 'echo' repeats the address in its error
+      const closed = body.list_ids.includes('closed');
+      const echo = body.list_ids.includes('echo');
+      res.writeHead(closed || echo ? 400 : 200, { 'Content-Type': 'application/json' });
+      const error = closed ? 'list is not public' : `contact ${body.contact.email} is blocked`;
+      res.end(JSON.stringify(closed || echo ? { error } : { success: true }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      url: `http://127.0.0.1:${server.address().port}`,
+      requests,
+      close: () => new Promise((r) => server.close(() => r())),
+    }));
+  });
+}
+
+export async function startService(env = {}, log = quietLog) {
   const dataDir = tempDir();
   const config = loadConfig({
     HMAC_SECRET: TEST_SECRET,
@@ -91,7 +127,7 @@ export async function startService(env = {}) {
     ALTCHA_COUNTER_MAX: '20',
     ...env,
   });
-  const service = await start(config, quietLog);
+  const service = await start(config, log);
   return {
     config,
     base: `http://127.0.0.1:${service.port}`,

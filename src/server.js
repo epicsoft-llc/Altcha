@@ -24,7 +24,7 @@ const TYPES = {
   '.svg': 'image/svg+xml',
 };
 
-const PUBLIC_ROUTES = new Set(['/widget.js', '/widget.i18n.js', '/challenge', '/verify', '/submit']);
+const PUBLIC_ROUTES = new Set(['/widget.js', '/widget.i18n.js', '/challenge', '/verify', '/submit', '/subscribe']);
 const ADMIN_ROUTES = [
   [/^\/api\/sites\/\d+\/test-mail$/, '/api/sites/:id/test-mail'],
   [/^\/api\/sites\/\d+$/, '/api/sites/:id'],

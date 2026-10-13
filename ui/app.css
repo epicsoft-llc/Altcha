@@ -29,6 +29,7 @@
   --s-challenges: #2a78d6;
   --s-verified: #eb6834;
   --s-sent: #1baf7a;
+  --s-subscribed: #8a63d2;
   --s-rejected: #eda100;
   --radius: 12px;
   --radius-sm: 8px;
@@ -64,6 +65,7 @@
     --s-challenges: #3987e5;
     --s-verified: #d95926;
     --s-sent: #199e70;
+    --s-subscribed: #9b7ee6;
     --s-rejected: #c98500;
   }
 }
@@ -94,6 +96,7 @@
   --s-challenges: #3987e5;
   --s-verified: #d95926;
   --s-sent: #199e70;
+  --s-subscribed: #9b7ee6;
   --s-rejected: #c98500;
 }
 
@@ -657,7 +660,7 @@ kbd {
 
 .kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1128,6 +1131,13 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
 .chip {
   display: inline-block;
   font-size: 0.78rem;
@@ -1481,11 +1491,14 @@ kbd {
    Narrow screens: tiles wrap, panels stack, site rows become cards
    --------------------------------------------------------------------------- */
 
-@media (max-width: 1080px) {
+/* six tiles need about 190px each */
+@media (max-width: 1200px) {
   .kpis {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
 
+@media (max-width: 1080px) {
   .panels {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1591,7 +1604,7 @@ kbd {
   }
 }
 
-/* phones: two compact tiles per row instead of five full-width ones */
+/* phones: two compact tiles per row instead of six full-width ones */
 @media (max-width: 420px) {
   .kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));

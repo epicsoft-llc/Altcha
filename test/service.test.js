@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import { createSite, fetchChallenge, solve, startService, startSmtpSink } from './helpers.js';
+import { createSite, fetchChallenge, solve, startNewsletterSink, startService, startSmtpSink } from './helpers.js';
 
 const ORIGIN = 'https://forms.example.com';
 const FOREIGN = 'https://elsewhere.example.org';
@@ -27,8 +27,11 @@ async function freshPayload(service, origin = ORIGIN) {
 }
 
 describe('public port', () => {
+  const BLOCKED_ORIGIN = 'https://blocked.example.com';
+  const logged = [];
   let sink;
   let service;
+  let blockedId;
 
   before(async () => {
     sink = await startSmtpSink();
@@ -39,7 +42,7 @@ describe('public port', () => {
       SMTP_FROM: 'form@example.com',
       // every case here comes from the same address
       RATE_SUBMIT_PER_IP: '100',
-    });
+    }, { info: () => {}, error: (message) => logged.push(message) });
     const created = await createSite(service, {
       name: 'forms',
       origins: [ORIGIN],
@@ -49,6 +52,9 @@ describe('public port', () => {
     });
     assert.equal(created.status, 201);
     assert.equal((await createSite(service, { name: 'verify-only', origins: ['https://app.example.com'] })).status, 201);
+    const blocked = await createSite(service, { name: 'blocked', origins: [BLOCKED_ORIGIN], recipient: 'blocked@example.com' });
+    assert.equal(blocked.status, 201);
+    blockedId = blocked.body.id;
   });
 
   after(async () => {
@@ -142,6 +148,182 @@ describe('public port', () => {
     form.append('altcha', 'x');
     const response = await fetch(`${service.base}/submit`, { method: 'POST', headers: { Origin: ORIGIN }, body: form });
     assert.equal((await response.json()).error, 'unsupported_media_type');
+  });
+
+  test('an error text of the mail server reaches the log without the address', async () => {
+    const response = await postForm(service, '/submit', { message: 'A question', altcha: await freshPayload(service, BLOCKED_ORIGIN) }, { Origin: BLOCKED_ORIGIN });
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).error, 'delivery_failed');
+    let line = logged.at(-1);
+    assert.ok(line.startsWith('mail for site=blocked not delivered') && line.includes('<address>'), line);
+    assert.ok(!line.includes('blocked@example.com'), line);
+
+    const testMail = await fetch(`${service.admin}/api/sites/${blockedId}/test-mail`, { method: 'POST', headers: { 'X-Altcha-Admin': '1' } });
+    assert.equal(testMail.status, 502);
+    // the admin set the recipient - the answer keeps it, the log does not
+    assert.ok((await testMail.json()).detail.includes('blocked@example.com'));
+    line = logged.at(-1);
+    assert.ok(line.startsWith('test mail for site=blocked failed') && line.includes('<address>'), line);
+    assert.ok(!line.includes('blocked@example.com'), line);
+  });
+});
+
+describe('newsletter list', () => {
+  const LIST_ORIGIN = 'https://news.example.com';
+  const MULTI_ORIGIN = 'https://multi.example.com';
+  const ECHO_ORIGIN = 'https://echo.example.com';
+  const logged = [];
+  let sink;
+  let service;
+
+  before(async () => {
+    sink = await startNewsletterSink();
+    // no SMTP: /subscribe does not need it
+    service = await startService({ RATE_SUBMIT_PER_IP: '100' }, { info: () => {}, error: (message) => logged.push(message) });
+    const created = await createSite(service, {
+      name: 'news',
+      origins: [LIST_ORIGIN],
+      subscription: { url: `${sink.url}/`, workspaceId: 'ws1', listIds: 'weekly, updates weekly' },
+    });
+    assert.equal(created.status, 201);
+    assert.deepEqual(created.body.subscription, { url: sink.url, workspaceId: 'ws1', listIds: ['weekly', 'updates'], languageLists: {} });
+    const multi = await createSite(service, {
+      name: 'multi',
+      origins: [MULTI_ORIGIN],
+      subscription: {
+        url: sink.url, workspaceId: 'ws1', listIds: ['weekly'],
+        languageLists: { fr: 'weeklyfr', ' DE ': ['weeklyde', 'updatesde'], es: ['weeklyes'], 'zh-hant': ['weeklyzh'] },
+      },
+    });
+    assert.equal(multi.status, 201);
+    assert.deepEqual(multi.body.subscription.languageLists, { fr: ['weeklyfr'], de: ['weeklyde', 'updatesde'], es: ['weeklyes'], 'zh-hant': ['weeklyzh'] });
+    const closed = await createSite(service, {
+      name: 'closed',
+      origins: ['https://closed.example.com'],
+      subscription: { url: sink.url, workspaceId: 'ws1', listIds: ['closed'] },
+    });
+    assert.equal(closed.status, 201);
+    const echo = await createSite(service, {
+      name: 'echo',
+      origins: [ECHO_ORIGIN],
+      subscription: { url: sink.url, workspaceId: 'ws1', listIds: ['echo'] },
+    });
+    assert.equal(echo.status, 201);
+  });
+
+  after(async () => {
+    await service.close();
+    await sink.close();
+  });
+
+  function subscribe(fields, origin = LIST_ORIGIN) {
+    return postForm(service, '/subscribe', fields, { Origin: origin });
+  }
+
+  test('passes address, name and language on, to the workspace and lists of the site', async () => {
+    const before = sink.requests.length;
+    const response = await subscribe({
+      email: 'reader@example.org', name: 'Ada\r\nLovelace', language: 'de', message: 'stays here', workspace_id: 'other', list_ids: 'other',
+      altcha: await freshPayload(service, LIST_ORIGIN),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(sink.requests.length, before + 1);
+    const forwarded = sink.requests.at(-1);
+    assert.equal(forwarded.method, 'POST');
+    assert.equal(forwarded.path, '/subscribe');
+    assert.equal(forwarded.type, 'application/json');
+    assert.deepEqual(forwarded.body, {
+      workspace_id: 'ws1',
+      contact: { email: 'reader@example.org', full_name: 'Ada  Lovelace', language: 'de' },
+      list_ids: ['weekly', 'updates'],
+    });
+  });
+
+  test('an invalid address is refused before the solution is spent', async () => {
+    const payload = await freshPayload(service, LIST_ORIGIN);
+    const wrong = await subscribe({ email: 'not-an-address', altcha: payload });
+    assert.equal(wrong.status, 400);
+    assert.equal((await wrong.json()).error, 'email_invalid');
+    assert.equal((await subscribe({ email: 'second@example.org', altcha: payload })).status, 200);
+  });
+
+  test('the honeypot is answered like a success but not passed on', async () => {
+    const before = sink.requests.length;
+    const response = await subscribe({ email: 'bot@example.org', website: 'http://spam.example', altcha: await freshPayload(service, LIST_ORIGIN) });
+    assert.equal(response.status, 200);
+    assert.equal(sink.requests.length, before);
+  });
+
+  test('a refusal of the list is a delivery failure, and both outcomes are counted', async () => {
+    const closedOrigin = 'https://closed.example.com';
+    const response = await subscribe({ email: 'reader@example.org', altcha: await freshPayload(service, closedOrigin) }, closedOrigin);
+    assert.equal(response.status, 502);
+    assert.equal((await response.json()).error, 'delivery_failed');
+
+    const metrics = await (await fetch(`${service.admin}/metrics`)).text();
+    for (const line of ['altcha_subscriptions_total{site="news"} 2', 'altcha_subscription_errors_total{site="closed"} 1', 'altcha_verified_total{site="news",endpoint="subscribe"}']) {
+      assert.ok(metrics.includes(line), line);
+    }
+    const history = await (await fetch(`${service.admin}/api/stats?range=24h`)).json();
+    assert.equal(history.totals.subscribed, 2);
+    assert.equal(history.totals.subscribeErrors, 1);
+  });
+
+  test('without a list /subscribe is off, without SMTP /submit is off', async () => {
+    assert.equal((await createSite(service, { name: 'plain', origins: ['https://plain.example.com'] })).status, 201);
+    const response = await subscribe({ email: 'reader@example.org', altcha: 'x' }, 'https://plain.example.com');
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error, 'subscribe_disabled');
+    const submit = await postForm(service, '/submit', { altcha: 'x' }, { Origin: LIST_ORIGIN });
+    assert.equal((await submit.json()).error, 'submit_disabled');
+  });
+
+  test('the list settings are validated', async () => {
+    const lists = Array.from({ length: 11 }, (_, i) => `list${i}`);
+    const broken = await createSite(service, {
+      name: 'broken',
+      origins: ['https://broken.example.com'],
+      subscription: { url: 'ftp://news.example.com', workspaceId: 'ws_1', listIds: lists },
+    });
+    assert.equal(broken.status, 400);
+    assert.deepEqual(Object.keys(broken.body.fields).sort(), ['subscriptionLists', 'subscriptionUrl', 'subscriptionWorkspace']);
+    const query = await createSite(service, {
+      name: 'broken',
+      origins: ['https://broken.example.com'],
+      subscription: { url: 'https://news.example.com/?token=1', workspaceId: 'ws1', listIds: ['weekly'] },
+    });
+    assert.deepEqual(Object.keys(query.body.fields), ['subscriptionUrl']);
+    for (const languageLists of [{ french: ['weeklyfr'] }, { fr: [] }, 'fr: weeklyfr', { fr: ['weekly_fr'] }]) {
+      const languages = await createSite(service, {
+        name: 'broken',
+        origins: ['https://broken.example.com'],
+        subscription: { url: 'https://news.example.com', workspaceId: 'ws1', listIds: ['weekly'], languageLists },
+      });
+      assert.deepEqual(Object.keys(languages.body.fields), ['subscriptionLanguageLists'], JSON.stringify(languageLists));
+    }
+  });
+
+  test('a sign-up goes to the lists of its language tag, then of each shorter tag, else to the site lists', async () => {
+    const cases = [
+      ['fr', ['weeklyfr']], ['de-AT', ['weeklyde', 'updatesde']], ['DE', ['weeklyde', 'updatesde']], ['es-419', ['weeklyes']],
+      ['zh-Hant-TW', ['weeklyzh']], ['fil', ['weekly']], ['', ['weekly']],
+    ];
+    for (const [language, lists] of cases) {
+      const response = await subscribe({ email: 'reader@example.org', language, altcha: await freshPayload(service, MULTI_ORIGIN) }, MULTI_ORIGIN);
+      assert.equal(response.status, 200);
+      const forwarded = sink.requests.at(-1).body;
+      assert.deepEqual(forwarded.list_ids, lists, language);
+      assert.equal(forwarded.contact.language, language === '' ? undefined : language.toLowerCase(), language);
+    }
+  });
+
+  test('an error text of Notifuse reaches the log without the address', async () => {
+    const response = await subscribe({ email: "o'brien@example.org", altcha: await freshPayload(service, ECHO_ORIGIN) }, ECHO_ORIGIN);
+    assert.equal(response.status, 502);
+    const line = logged.at(-1);
+    assert.ok(line.includes('contact <address> is blocked'), line);
+    assert.ok(!line.includes('brien'), line);
   });
 });
 

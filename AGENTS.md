@@ -3,7 +3,7 @@
 Guidance for coding agents working in this repository. User documentation lives in [`README.md`](README.md).
 
 A Docker image: a Node.js service that issues and verifies ALTCHA challenges for many sites, serves the widget,
-mails verified form submissions, and has an admin web UI on a second port.
+mails verified form submissions, passes newsletter sign-ups on to Notifuse, and has an admin web UI on a second port.
 
 ## Coordinates
 
@@ -45,21 +45,21 @@ docker build -t altcha:dev .
 src/
 ├── server.js       entry point: config, two HTTP servers, shutdown; start() is what the tests call
 ├── config.js       environment variables, <NAME>_FILE secrets, validation - fails the start with a clear message
-├── public.js       public port: /widget.js, /widget.i18n.js, /challenge, /verify, /submit
+├── public.js       public port: /widget.js, /widget.i18n.js, /challenge, /verify, /submit, /subscribe
 ├── admin.js        admin port: UI, /api/*, /metrics, /healthz, CSRF header
 ├── auth.js         sign-in on the admin port: proxy header, Basic auth, API token, lockout after failures
 ├── altcha.js       issue and check challenges (altcha-lib, deterministic mode)
 ├── store.js        ALL database access (node:sqlite) - sites, origins, spent challenges, hourly statistics, migrations
 ├── sites.js        validation of a site from the API
 ├── smtp.js         SMTP client (STARTTLS / TLS / plain, AUTH PLAIN / LOGIN)
-├── mail.js         builds the message
+├── mail.js         builds the message; withoutAddresses() for error texts on their way to the log
 ├── ratelimit.js    sliding window in memory
 ├── stats.js        every event goes here: Prometheus registry + buffered hourly totals in the database, history for the UI
 ├── metrics.js      counter, gauge, histogram and the text exposition format - no client library
 ├── http.js         body reading, field parsing, client address, origin
 └── healthcheck.js  container HEALTHCHECK
 ui/                 admin UI: index.html (icon sprite), app.js, chart.js (SVG line chart), app.css - no framework, no build step
-test/               node:test; helpers.js starts the service and an SMTP sink in-process
+test/               node:test; helpers.js starts the service, an SMTP sink and a newsletter sink in-process
 docs/               reference too long for the README: api.md (endpoints, refusal reasons), metrics.md
 examples/           prometheus-alerts.yml
 ```
@@ -78,6 +78,12 @@ examples/           prometheus-alerts.yml
   into a CPU sink.
 - **The mail recipient comes from the site, never from the request.** No visitor input in a mail header except
   `Reply-To` after `MAIL_ADDRESS` matched; subject and body are base64.
+- **The newsletter list comes from the site, never from the request.** `/subscribe` sends Notifuse only `email`, `name`
+  and `language`, to the site's workspace and lists - the form's `language` only picks among the site's lists.
+  `/submit` and `/subscribe` share `withinLimits` and `fromHuman` (solution, then honeypot) - a new form endpoint goes
+  through both.
+- **Error texts from outside pass `withoutAddresses()` before the log** - the mail server and Notifuse may repeat an
+  address, maybe the visitor's, and the README promises that none reaches the log.
 - **Redirect targets (`successUrl`, `errorUrl`) must be on one of the site's origins** — otherwise `/submit` is an
   open redirect.
 - **Changing admin requests need `X-Altcha-Admin: 1`** - the CSRF protection for Basic auth and proxy cookies; the admin

@@ -8,6 +8,14 @@ import { MAIL_ADDRESS } from './config.js';
 
 const CONTROL = /[\u0000-\u001f\u007f]/g;
 const MAX_SUBJECT = 200;
+// what MAIL_ADDRESS allows before the @, on both sides - masks rather too much than too little
+const ADDRESS = /[^\s@<>,;:"()[\]\\]+@[^\s@<>,;:"()[\]\\]+/g;
+
+// Error texts of the mail server and of Notifuse go to the log - an address in them, maybe
+// the visitor's, does not.
+export function withoutAddresses(text) {
+  return String(text).replace(ADDRESS, '<address>');
+}
 
 // RFC 2047 caps an encoded word at 75 characters; longer text becomes several words
 // on folded lines. Splitting by characters keeps multi-byte sequences whole.

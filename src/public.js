@@ -1,9 +1,13 @@
-// The public port: widget, challenge, verify and submit. A browser request is mapped
+// The public port: widget, challenge, verify, submit and subscribe. A browser request is mapped
 // to a site by its Origin (or Referer); CORS only lets the browser read the answer,
 // the protection is the check on this side.
 
 import { BodyError, clientIp, mediaType, parseFields, rateKey, readBody, requestOrigin, sendJson } from './http.js';
-import { buildMessage } from './mail.js';
+import { LANGUAGE_TAG, MAIL_ADDRESS } from './config.js';
+import { buildMessage, withoutAddresses } from './mail.js';
+
+const SUBSCRIBE_TIMEOUT_MS = 10000;
+const CONTROL = /[\u0000-\u001f\u007f]/g;
 
 function cors(res, origin) {
   res.setHeader('Access-Control-Allow-Origin', origin);
@@ -140,37 +144,52 @@ export function createPublicHandler({ config, store, altcha, limiter, stats, mai
     sendJson(res, 200, { ok: true, verified: true, site: checked.site.name });
   }
 
-  async function submit(req, res, site) {
-    if (site.recipient === null || mailer === null) {
-      reject(req, res, 404, 'submit_disabled', site);
-      return;
-    }
+  // The limits per address and per site count /submit and /subscribe together.
+  function withinLimits(req, res, site) {
     if (!limiter.allow('s:' + client(req), config.rate.submitPerIp)) {
       reject(req, res, 429, 'rate_ip', site);
-      return;
+      return false;
     }
     if (!limiter.allow('d:' + site.name, site.submitPerHour)) {
       reject(req, res, 429, 'rate_site', site);
-      return;
+      return false;
     }
-    const fields = await readFields(req);
+    return true;
+  }
+
+  // A valid unspent solution and an empty honeypot; both fields leave `fields` here.
+  // False once the answer is sent - a bot that filled the honeypot gets the same
+  // answer as everybody else.
+  async function fromHuman(req, res, site, endpoint, fields) {
     const checked = await checkPayload(fields, site);
     if (checked.reason !== null) {
       reject(req, res, 403, checked.reason, site);
-      return;
+      return false;
     }
-    stats.verified(site, 'submit', checked.result);
-
-    // honeypot: filled means a bot - it gets the same answer as everybody else
+    stats.verified(site, endpoint, checked.result);
     const honeypot = fields[config.honeypotField] ?? '';
     delete fields.altcha;
     delete fields[config.honeypotField];
     if (honeypot !== '') {
       stats.rejected(site, 'honeypot');
       succeed(req, res, site, { ok: true });
+      return false;
+    }
+    return true;
+  }
+
+  async function submit(req, res, site) {
+    if (site.recipient === null || mailer === null) {
+      reject(req, res, 404, 'submit_disabled', site);
       return;
     }
-
+    if (!withinLimits(req, res, site)) {
+      return;
+    }
+    const fields = await readFields(req);
+    if (!(await fromHuman(req, res, site, 'submit', fields))) {
+      return;
+    }
     const message = buildMessage({ smtp: config.smtp, site, origin: requestOrigin(req), fields });
     const started = performance.now();
     try {
@@ -178,11 +197,85 @@ export function createPublicHandler({ config, store, altcha, limiter, stats, mai
     }
     catch (e) {
       stats.smtpError(site, (performance.now() - started) / 1000);
-      log.error(`mail for site=${site.name} not delivered: ${e.message}`);
+      log.error(`mail for site=${site.name} not delivered: ${withoutAddresses(e.message)}`);
       reject(req, res, 502, 'delivery_failed', site);
       return;
     }
     stats.sent(site, (performance.now() - started) / 1000);
+    succeed(req, res, site, { ok: true });
+  }
+
+  // Only the address and, when sent, name and language leave the service.
+  function contactOf(fields) {
+    const contact = { email: String(fields.email ?? '').trim() };
+    const name = String(fields.name ?? '').replace(CONTROL, ' ').trim().slice(0, 120);
+    if (name !== '') {
+      contact.full_name = name;
+    }
+    const language = String(fields.language ?? '').trim().toLowerCase();
+    if (LANGUAGE_TAG.test(language)) {
+      contact.language = language;
+    }
+    return contact;
+  }
+
+  // The lists for the language the form sends - the whole tag, then each shorter one
+  // (zh-hant-tw, zh-hant, zh) - else the site's lists. The form chooses among the site's
+  // lists, never a list of its own.
+  function listsFor(subscription, language) {
+    const parts = language === undefined ? [] : language.split('-');
+    const keys = parts.map((_, i) => parts.slice(0, parts.length - i).join('-'));
+    const match = keys.find((key) => Object.hasOwn(subscription.languageLists, key));
+    return match === undefined ? subscription.listIds : subscription.languageLists[match];
+  }
+
+  // Workspace and lists come from the site, never from the request. Notifuse mails the
+  // confirmation link itself when the list asks for double opt-in.
+  async function subscribe(req, res, site) {
+    if (site.subscription === null) {
+      reject(req, res, 404, 'subscribe_disabled', site);
+      return;
+    }
+    if (!withinLimits(req, res, site)) {
+      return;
+    }
+    const fields = await readFields(req);
+    const contact = contactOf(fields);
+    // checked before the solution is spent, so a typo costs no new challenge
+    if (!MAIL_ADDRESS.test(contact.email)) {
+      reject(req, res, 400, 'email_invalid', site);
+      return;
+    }
+    if (!(await fromHuman(req, res, site, 'subscribe', fields))) {
+      return;
+    }
+    const { url, workspaceId } = site.subscription;
+    const listIds = listsFor(site.subscription, contact.language);
+    let accepted = false;
+    try {
+      const answer = await fetch(`${url}/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ workspace_id: workspaceId, contact, list_ids: listIds }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(SUBSCRIBE_TIMEOUT_MS),
+      });
+      const body = await answer.json().catch(() => null);
+      accepted = answer.ok && body?.success === true;
+      if (!accepted) {
+        const detail = typeof body?.error === 'string' ? `: ${withoutAddresses(body.error).slice(0, 200)}` : '';
+        log.error(`subscription for site=${site.name} refused with status ${answer.status}${detail}`);
+      }
+    }
+    catch (e) {
+      log.error(`subscription for site=${site.name} failed: ${withoutAddresses(e.message)}`);
+    }
+    if (!accepted) {
+      stats.subscribeError(site);
+      reject(req, res, 502, 'delivery_failed', site);
+      return;
+    }
+    stats.subscribed(site);
     succeed(req, res, site, { ok: true });
   }
 
@@ -208,7 +301,7 @@ export function createPublicHandler({ config, store, altcha, limiter, stats, mai
     }
 
     const route = `${req.method} ${path}`;
-    if (route !== 'GET /challenge' && route !== 'POST /verify' && route !== 'POST /submit') {
+    if (route !== 'GET /challenge' && route !== 'POST /verify' && route !== 'POST /submit' && route !== 'POST /subscribe') {
       reject(req, res, 404, 'route_unknown', known ? site : null);
       return;
     }
@@ -232,8 +325,11 @@ export function createPublicHandler({ config, store, altcha, limiter, stats, mai
       else if (route === 'POST /verify') {
         await verify(req, res, known ? site : null);
       }
-      else {
+      else if (route === 'POST /submit') {
         await submit(req, res, site);
+      }
+      else {
+        await subscribe(req, res, site);
       }
     }
     catch (e) {
